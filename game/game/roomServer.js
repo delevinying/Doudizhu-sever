@@ -4,6 +4,8 @@
 
 var wss = require('../../socket/websocket');
 var commands = require('../../socket/commands');
+var PokerLogic = require('./pokerLogic');
+var CARD_TYPE = require('./cardType');
 
 
 var RoomServer = function () {
@@ -39,25 +41,6 @@ p.addCurIndex = function () {
  * 特例：4443,记录4 ; 666654，记录6
  * */
 
-//先定义可能出现的牌型
-const CARD_TYPE = {
-    //各种牌型的对应数字
-    NO_CARDS : -1, //前面没有牌（每次开始出牌）
-    ERROR_CARDS : 0, //错误牌型
-    SINGLE_CARD : 1, //单牌
-    DOUBLE_CARD : 2, //对子
-    THREE_CARD : 3,//3不带
-    THREE_ONE_CARD : 4,//3带1
-    THREE_TWO_CARD : 5, //3带2
-    BOMB_TWO_CARD : 6, //四个带2张单牌
-    BOMB_FOUR_CARD : 7, //四个带2对
-    CONNECT_CARD : 8, //连牌
-    COMPANY_CARD : 9, //连队
-    AIRCRAFT_CARD : 10, //飞机不带
-    AIRCRAFT_WING : 11, //飞机带单牌或对子
-    BOMB_CARD : 12, //炸弹
-    KINGBOMB_CARD : 13//王炸
-};
 //只记录最小的一张，特例比如4443，要记录4，注意这里的index是跟curPlayerIndex不一样
 p.curCards = {type: CARD_TYPE.NO_CARDS, header:0, cards:[]};
 
@@ -108,6 +91,7 @@ p.handlePlayersQuest = function (index, data) {
 
 p.nowBigger = 0; //这个数据用来记录当前牌最大的那个人
 p.passNum = 0; //这个数据用来记录有几个人点了pass，如果有2个，说明要重新出牌了。
+p.pokerLogic = new PokerLogic();
 p.playCard = function (index, curCards, seq) {
     //前后端都需要判断出牌是否符合规则
     // if(cardPlayAble(this["p"+index+"Cards"], content.cards))
@@ -116,9 +100,32 @@ p.playCard = function (index, curCards, seq) {
     // }
     if(curCards.cards.length !== 0)
     {
+        //判断出牌是否符合规则
+        let cardsType = this.pokerLogic.calcPokerType(curCards.cards);
+        if (cardsType != curCards.type) {
+            console.log('计算出的类型为'+cardsType+',传过来的为'+curCards.type);
+            this.sendToOnePlayers(index, {command:commands.PLAYER_PLAYCARD, seq:seq, code: -2});
+            return;
+        }
+        let cardsHeader = this.pokerLogic.calcPokerHeader(curCards.cards, curCards.type);
+        if (cardsHeader != curCards.header) {
+            console.log('计算出的header为'+cardsHeader+',传过来的为'+curCards.header);
+            this.sendToOnePlayers(index, {command:commands.PLAYER_PLAYCARD, seq:seq, code: -2});
+            return;
+        }
+        
+        if ( ! this.pokerLogic.canOut(curCards, this.curCards)) {
+            this.sendToOnePlayers(index, {command:commands.PLAYER_PLAYCARD, seq:seq, code: -3});
+            return;
+        }
+        
+        //判断出牌是否符合规则
         if(!this.removeCards(index ,curCards.cards))
         {
-            console.log('有人出了一张他没有的牌？！')
+            console.log('有人出了一张他没有的牌？！');
+            //TODO: 错误消息内容
+            this.sendToOnePlayers(index, {command:commands.PLAYER_PLAYCARD, seq:seq, code: -1});
+            return;
         }
     }
     console.log('告知玩家出牌成功');
@@ -136,12 +143,15 @@ p.playCard = function (index, curCards, seq) {
         {
             this.nowBigger = this.curPlayerIndex - 1 < 1  ? 3 : this.curPlayerIndex - 1;
             console.log('有一个玩家点击了过牌现在牌最大的玩家是'+this.nowBigger);
-            this.curCards.type = -2;
+            this.addCurIndex();
+            this.sendToRoomPlayers({command:commands.PLAY_GAME, content:{ state:1, curPlayerIndex:this.curPlayerIndex, curCard:{type: CARD_TYPE.PASS_CARDS, header:0, cards:[]}}});
+            return;
         }else if(this.passNum === 2) //连续两个人点击了过，说明要重新发起出牌流程，而起始就是之前最大的那个人
         {
             console.log('有两个玩家点击了过牌');
             this.passNum = 0;
             this.curPlayerIndex = this.nowBigger;
+            this.curCards = {type: CARD_TYPE.NO_CARDS, header:0, cards:[]};
             this.sendToRoomPlayers({command:commands.PLAY_GAME, content:{ state:1, curPlayerIndex:this.curPlayerIndex, curCard:{type: CARD_TYPE.NO_CARDS, header:0, cards:[]}}});
             this.nowBigger = 0;
             return;
